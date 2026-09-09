@@ -1,7 +1,6 @@
 # Local root files & build outputs
 /commit-msg.txt
-build/
-/build
+
 
 # JDK / JRE directories
 jdk-*/
