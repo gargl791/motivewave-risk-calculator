@@ -1,23 +1,35 @@
-### AL ###
-#Template for AL projects for Dynamics 365 Business Central
-#launch.json folder
-.vscode/
-#Cache folder
-.alcache/
-#Symbols folder
-.alpackages/
-#Snapshots folder
-.snapshots/
-#Testing Output folder
-.output/
-#Extension App-file
-*.app
-#Rapid Application Development File
-rad.json
-#Translation Base-file
-*.g.xlf
-#License-files
-*.bclicense
-*.flf
-#Test results file
-TestResults.xml
+# Local root files & build outputs
+/commit-msg.txt
+build/
+/build
+
+# JDK / JRE directories
+jdk-*/
+jre-*/
+*.jdk/
+
+# Java compiled outputs & archives
+*.class
+*.jar
+*.war
+*.ear
+*.zip
+*.tar.gz
+
+# Build tool directories
+bin/
+out/
+target/
+.gradle/
+
+# IDE files
+.idea/
+*.iml
+.classpath
+.project
+.settings/
+*.nbgraph
+
+# OS files
+.DS_Store
+Thumbs.db
