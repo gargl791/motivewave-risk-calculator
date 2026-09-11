@@ -146,6 +146,10 @@ public class RiskCalculator extends Study {
     /** SL price captured at the instant the order was submitted - the bracket always honours this,
      *  even if the user drags the SL line around afterwards. */
     private volatile Double armedStopLossPrice;
+    /** Real average fill price, captured once the entry order actually fills (Order.getAvgFillPrice()) -
+     *  freezes the entry line and all RR preview lines to the real fill instead of letting them keep
+     *  drifting with lockedToMarket while a trade is live. */
+    private volatile Double armedEntryPrice;
     /** Instrument resolveTradeInstrument() returned at entry-submission time, cached so the
      *  eventual fill can be checked against what we expected to be routed to. See
      *  handleEntryFilled() / verifyFillInstrument(). */
@@ -314,7 +318,7 @@ public class RiskCalculator extends Study {
         figuresInitialized = false;
         entryPrice = null;
         stopLossPrice = null;
-        lockedToMarket = false;
+        lockedToMarket = true;
         hoverPrice = 0;
         lastBounds = null;
         ghostLine = null;
@@ -486,6 +490,8 @@ public class RiskCalculator extends Study {
 
     @Override
     public boolean onClick(Point p, int flags) {
+        boolean wasNearEntry = showEntryGhost;
+        boolean wasNearSL = showSLGhost;
         showEntryGhost = false;
         showSLGhost = false;
 
@@ -509,7 +515,7 @@ public class RiskCalculator extends Study {
             return true;
         }
 
-        handlePricePlacement();
+        handlePricePlacement(wasNearEntry, wasNearSL);
         refreshFigures();
         return true;
     }
@@ -1121,6 +1127,10 @@ public class RiskCalculator extends Study {
         float filledQty = order.getFilledAsFloat();
         if (filledQty <= 0) return;
 
+        if (armedEntryPrice == null) {
+            try { armedEntryPrice = (double) order.getAvgFillPrice(); } catch (Exception ignored) { }
+        }
+
         boolean isLong = order.isBuy();
         Double sl = armedStopLossPrice;
         if (sl == null) {
@@ -1280,6 +1290,7 @@ public class RiskCalculator extends Study {
         stopOrder = null;
         targetOrder = null;
         armedStopLossPrice = null;
+        armedEntryPrice = null;
         expectedTradeInstrument = null;
         bracketQuantity = 0;
         setStopPrice(null);
@@ -1299,7 +1310,7 @@ public class RiskCalculator extends Study {
             addFigure(new RiskLine(() -> getTPPreviewPrice(r), r + ":1", PATH_TP));
         }
 
-        addFigure(new RiskLine(this::getEntryPrice, "E", PATH_ENTRY));
+        addFigure(new RiskLine(this::getDisplayEntryPrice, "E", PATH_ENTRY));
         addFigure(new RiskLine(this::getDisplayStopLossPrice, this::getSLLineLabel, PATH_SL));
 
         addFigure(new LockButton());
@@ -1335,13 +1346,17 @@ public class RiskCalculator extends Study {
         }
     }
 
-    /** Preview R-multiple lines (purely visual reference grid - not tied to the trade R:R setting). */
+    /** Preview R-multiple lines (purely visual reference grid - not tied to the trade R:R setting).
+     *  Uses the display (frozen-once-filled) entry/SL so these lock in place once a trade is live,
+     *  same as the entry and SL lines themselves. */
     private Double getTPPreviewPrice(int ratio) {
-        if (entryPrice == null || stopLossPrice == null) return null;
-        double risk = Math.abs(entryPrice - stopLossPrice);
+        Double entry = getDisplayEntryPrice();
+        Double sl = getDisplayStopLossPrice();
+        if (entry == null || sl == null) return null;
+        double risk = Math.abs(entry - sl);
         if (risk == 0) return null;
-        boolean isLong = entryPrice > stopLossPrice;
-        return isLong ? entryPrice + (risk * ratio) : entryPrice - (risk * ratio);
+        boolean isLong = entry > sl;
+        return isLong ? entry + (risk * ratio) : entry - (risk * ratio);
     }
 
     private void refreshFigures() {
@@ -1377,6 +1392,14 @@ public class RiskCalculator extends Study {
         return armedStopLossPrice != null ? armedStopLossPrice : stopLossPrice;
     }
 
+    /** Same idea as getDisplayStopLossPrice(), but for entry: once filled, returns the real
+     *  average fill price instead of the live/lockedToMarket-following planning field, so the
+     *  entry line and every RR-multiple preview line freeze at the real fill instead of drifting
+     *  with the market while the trade is live. */
+    private Double getDisplayEntryPrice() {
+        return armedEntryPrice != null ? armedEntryPrice : entryPrice;
+    }
+
     /** Distinguishes the live/non-draggable state from the planning state on the SL line itself,
      *  not just via the (easy to miss) absence of a drag handle. */
     private String getSLLineLabel() {
@@ -1399,7 +1422,7 @@ public class RiskCalculator extends Study {
         refreshFigures();
     }
 
-    private void handlePricePlacement() {
+    private void handlePricePlacement(boolean wasNearEntry, boolean wasNearSL) {
         // Once a bracket is live (armedStopLossPrice != null), stopLossPrice is frozen - a click
         // here can't affect the real resting stop, so letting it silently overwrite the planning
         // field would just set up a "time bomb": the field would jump to a stale value the moment
@@ -1412,7 +1435,22 @@ public class RiskCalculator extends Study {
             entryPrice = hoverPrice;
         } else if (stopLossPrice == null) {
             if (!bracketLive) stopLossPrice = hoverPrice;
+        } else if (wasNearSL && !bracketLive) {
+            // A precise grab-and-drag on the SL handle is handled entirely by onResize()/
+            // onEndResize() and never reaches this method - but the handle sits right at the edge
+            // of this same hover margin (see RiskResizePoint.layout()), so an imprecise grab can
+            // fall through to a plain click instead of starting a drag. Previously, once both
+            // entry and SL were already placed, ANY click here (including this near-miss) reset
+            // entryPrice to the click and wiped stopLossPrice back to null - which is what made
+            // the SL and every RR-projection line vanish on a near-miss drag. Now: a click that
+            // landed near the existing SL line (same 10px proximity used for the ghost-line hover
+            // indicator) just nudges the SL price instead, matching what was actually intended.
+            stopLossPrice = hoverPrice;
+        } else if (wasNearEntry) {
+            // Same idea for a near-miss drag on the entry handle.
+            entryPrice = hoverPrice;
         } else {
+            // Click clearly away from both existing lines - start planning a new trade.
             entryPrice = hoverPrice;
             if (!bracketLive) stopLossPrice = null;
         }
@@ -1824,6 +1862,19 @@ public class RiskCalculator extends Study {
                 lines.add("TP " + (instr != null ? instr.format(targetPreview) : targetPreview));
             } else {
                 lines.add("Set entry + SL to size a trade");
+            }
+            // Live R-multiple readout while a bracket is actually live - uses the frozen armed
+            // entry/SL (not the live-drifting planning fields) so it reads correctly regardless
+            // of what lockedToMarket is doing to entryPrice in the background.
+            if (armedEntryPrice != null && armedStopLossPrice != null && instr != null) {
+                double armedRisk = Math.abs(armedEntryPrice - armedStopLossPrice);
+                if (armedRisk > 0) {
+                    double currentPx = getLatestPrice(dataCtx);
+                    boolean isLongLive = armedEntryPrice > armedStopLossPrice;
+                    double rMultiple = isLongLive ? (currentPx - armedEntryPrice) / armedRisk
+                                                   : (armedEntryPrice - currentPx) / armedRisk;
+                    lines.add("R: " + (rMultiple >= 0 ? "+" : "") + Util.formatDouble(rMultiple, 2));
+                }
             }
             lines.add(statusMessage);
             infoLines = lines.toArray(new String[0]);
