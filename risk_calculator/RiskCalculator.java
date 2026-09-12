@@ -258,6 +258,7 @@ public class RiskCalculator extends Study {
     private RiskLine ghostLine;
     private boolean showEntryGhost;
     private boolean showSLGhost;
+    private boolean justFinishedResize;
 
     @Override
     public void initialize(Defaults defaults) {
@@ -333,6 +334,7 @@ public class RiskCalculator extends Study {
         entryPrice = null;
         stopLossPrice = null;
         lockedToMarket = true;
+        justFinishedResize = false;
         hoverPrice = 0;
         lastBounds = null;
         ghostLine = null;
@@ -504,6 +506,19 @@ public class RiskCalculator extends Study {
 
     @Override
     public boolean onClick(Point p, int flags) {
+        // MotiveWave fires onClick() for the same mouse-up that ends a resize drag. Without this
+        // guard, that spurious click falls into handlePricePlacement() using stale hover-ghost
+        // flags (hover tracking doesn't run mid-drag) and lands in the "click clearly away from
+        // both lines" branch - which resets entryPrice to the release point and wipes
+        // stopLossPrice back to null. A genuine drag is already fully handled by onResize()/
+        // onEndResize(), so just consume and drop this one.
+        if (justFinishedResize) {
+            justFinishedResize = false;
+            showEntryGhost = false;
+            showSLGhost = false;
+            return true;
+        }
+
         boolean wasNearEntry = showEntryGhost;
         boolean wasNearSL = showSLGhost;
         showEntryGhost = false;
@@ -551,6 +566,7 @@ public class RiskCalculator extends Study {
 
     @Override
     public void onEndResize(ResizePoint rp, DrawContext ctx) {
+        justFinishedResize = true;
         notifyRedraw();
     }
 
@@ -1715,8 +1731,15 @@ public class RiskCalculator extends Study {
                 ? cachedSettings.displayMicroInstrument
                 : resolveMoneyInstrument(ctx, instr);
 
+        // maxContracts is an execution constraint (the most you can actually submit), and only
+        // makes sense against the mini contract you trade. When showing pure micro-instrument
+        // math, don't apply it - the informational display should reflect the uncapped size.
+        int cap = (cachedSettings.displayMicroEnabled && cachedSettings.displayMicroInstrument != null)
+                ? Integer.MAX_VALUE
+                : cachedSettings.maxContracts;
+
         int qty = computeQuantityForInstrument(moneyInstr, entryPrice, stopLossPrice,
-                cachedSettings.slippageTicks, cachedSettings.fixedRiskAmount, cachedSettings.maxContracts);
+                cachedSettings.slippageTicks, cachedSettings.fixedRiskAmount, cap);
 
         // A planned trade (real stop distance set) that sizes to 0 means the risk-per-contract
         // exceeds the configured budget - the same condition executeEntry() would refuse to
