@@ -168,6 +168,14 @@ public class RiskCalculator extends Study {
     // Cached geometry so Study.onClick() can hit-test without reaching into the Figure
     private Rectangle buyButtonBounds;
     private Rectangle sellButtonBounds;
+    private Rectangle execPanelBounds;
+
+    // Free-drag repositioning for the execution panel (session-only - not persisted to settings,
+    // so it resets to the configured corner on chart reload; keeps this isolated from settings
+    // I/O we haven't verified is safe to trigger mid-drag, given clearState()'s surprises).
+    private int panelOffsetX, panelOffsetY;
+    private boolean draggingPanel;
+    private int dragStartMouseX, dragStartMouseY, dragStartOffsetX, dragStartOffsetY;
 
     private static class CachedSettings {
         final int hoverWidth;
@@ -599,6 +607,43 @@ public class RiskCalculator extends Study {
         notifyRedraw();
     }
 
+    // ==================== Free-drag repositioning for the execution panel ====================
+    // Separate from the SL/entry ResizePoint drag machinery above (onResize/onEndResize) - this
+    // drags the panel's whole background, not a price handle, so it must never touch
+    // entryPrice/stopLossPrice/lockedToMarket.
+    @Override
+    public boolean supportsDrag() {
+        return true;
+    }
+
+    @Override
+    public void onBeginDrag(Point2D p, int flags, DrawContext ctx) {
+        // Only start a panel drag if the press is on the panel body but NOT on a button - button
+        // clicks must keep working as plain clicks (submitting orders), not drags.
+        if (execPanelBounds != null && execPanelBounds.contains(p)
+                && !(buyButtonBounds != null && buyButtonBounds.contains(p))
+                && !(sellButtonBounds != null && sellButtonBounds.contains(p))) {
+            draggingPanel = true;
+            dragStartMouseX = (int) p.getX();
+            dragStartMouseY = (int) p.getY();
+            dragStartOffsetX = panelOffsetX;
+            dragStartOffsetY = panelOffsetY;
+        }
+    }
+
+    @Override
+    public void onDrag(Point2D p, int flags, DrawContext ctx) {
+        if (!draggingPanel) return;
+        panelOffsetX = dragStartOffsetX + ((int) p.getX() - dragStartMouseX);
+        panelOffsetY = dragStartOffsetY + ((int) p.getY() - dragStartMouseY);
+        notifyRedraw();
+    }
+
+    @Override
+    public void onEndDrag(Point2D p, int flags, DrawContext ctx) {
+        draggingPanel = false;
+    }
+
     @Override
     public MenuDescriptor onMenu(String plotName, Point loc, DrawContext ctx) {
         var items = new ArrayList<MenuItem>();
@@ -607,6 +652,11 @@ public class RiskCalculator extends Study {
             clearState();
             cachedSettings = new CachedSettings(getSettings());
             initializeFiguresIfNeeded();
+        }));
+        items.add(new MenuItem(get("LBL_RESET_PANEL_POS"), () -> {
+            panelOffsetX = 0;
+            panelOffsetY = 0;
+            notifyRedraw();
         }));
         return new MenuDescriptor(items, true);
     }
@@ -1902,6 +1952,7 @@ public class RiskCalculator extends Study {
             if (!visible) {
                 buyButtonBounds = null;
                 sellButtonBounds = null;
+                execPanelBounds = null;
                 return;
             }
 
@@ -1997,6 +2048,10 @@ public class RiskCalculator extends Study {
                 panelY = bounds.y + margin;
             }
 
+            // Apply free-drag offset on top of the configured corner position.
+            panelX += panelOffsetX;
+            panelY += panelOffsetY;
+
             int buttonWidth = PANEL_WIDTH - PANEL_PADDING * 2;
             int buyY = panelY + PANEL_PADDING + textBlockHeight + PANEL_BUTTON_GAP;
             buyRect = new Rectangle(panelX + PANEL_PADDING, buyY, buttonWidth, PANEL_BUTTON_HEIGHT);
@@ -2012,6 +2067,7 @@ public class RiskCalculator extends Study {
 
             buyButtonBounds = buyRect;
             sellButtonBounds = sellRect;
+            execPanelBounds = new Rectangle(panelX, panelY, PANEL_WIDTH, panelHeight);
 
             setBounds(new Rectangle(panelX, panelY, PANEL_WIDTH, panelHeight));
         }
