@@ -168,14 +168,18 @@ public class RiskCalculator extends Study {
     // Cached geometry so Study.onClick() can hit-test without reaching into the Figure
     private Rectangle buyButtonBounds;
     private Rectangle sellButtonBounds;
-    private Rectangle execPanelBounds;
 
-    // Free-drag repositioning for the execution panel (session-only - not persisted to settings,
-    // so it resets to the configured corner on chart reload; keeps this isolated from settings
-    // I/O we haven't verified is safe to trigger mid-drag, given clearState()'s surprises).
-    private int panelOffsetX, panelOffsetY;
-    private boolean draggingPanel;
-    private int dragStartMouseX, dragStartMouseY, dragStartOffsetX, dragStartOffsetY;
+    // Free-drag repositioning for the execution panel, via a relative-positioned ResizePoint of
+    // type ALL (per SDK docs: "If relative positioning is used then the resize point is
+    // specified using the (x,y) screen coordinates on the chart" - the same documented mechanism
+    // the original corner-only implementation deferred on). null until the user drags it for the
+    // first time, at which point it holds the panel's anchor in screen (x,y) pixels, overriding
+    // the corner setting. Session-only (not persisted to Settings) for the same reason noted
+    // elsewhere in this file - avoiding untested settings I/O mid-drag.
+    private Double panelRelX, panelRelY;
+    private ResizePoint panelResize;
+    private boolean panelDragInProgress;
+    private int lastPanelX, lastPanelY;
 
     private static class CachedSettings {
         final int hoverWidth;
@@ -273,6 +277,7 @@ public class RiskCalculator extends Study {
     public void initialize(Defaults defaults) {
         entryResize = new RiskResizePoint(this::getEntryPrice);
         slResize = new RiskResizePoint(this::getStopLossPrice);
+        panelResize = new PanelResizePoint();
 
         var sd = createSD();
         var tab = sd.addTab(get("TAB_GENERAL"));
@@ -583,6 +588,18 @@ public class RiskCalculator extends Study {
     public void onResize(ResizePoint rp, DrawContext ctx) {
         if (rp == null) return;
 
+        if (rp == panelResize) {
+            // Relative-mode accessor - already plain screen (x,y) pixels, confirmed via SDK
+            // javadoc, no conversion needed.
+            Point2D loc = rp.getGraphLocation();
+            panelRelX = loc.getX();
+            panelRelY = loc.getY();
+            panelDragInProgress = true;
+            justFinishedResize = true; // same post-drag phantom-click guard as SL/entry
+            notifyRedraw();
+            return;
+        }
+
         // Set as soon as a drag starts (not just at the end) - MotiveWave's onClick() for the
         // drag's mouse-up can fire before onEndResize() runs, so waiting until onEndResize left a
         // window where the guard wasn't up yet in time for that click.
@@ -602,46 +619,15 @@ public class RiskCalculator extends Study {
 
     @Override
     public void onEndResize(ResizePoint rp, DrawContext ctx) {
+        if (rp == panelResize) {
+            panelDragInProgress = false;
+            justFinishedResize = true;
+            notifyRedraw();
+            return;
+        }
         dragInProgress = false;
         justFinishedResize = true;
         notifyRedraw();
-    }
-
-    // ==================== Free-drag repositioning for the execution panel ====================
-    // Separate from the SL/entry ResizePoint drag machinery above (onResize/onEndResize) - this
-    // drags the panel's whole background, not a price handle, so it must never touch
-    // entryPrice/stopLossPrice/lockedToMarket.
-    @Override
-    public boolean supportsDrag() {
-        return true;
-    }
-
-    @Override
-    public void onBeginDrag(Point2D p, int flags, DrawContext ctx) {
-        // Only start a panel drag if the press is on the panel body but NOT on a button - button
-        // clicks must keep working as plain clicks (submitting orders), not drags.
-        if (execPanelBounds != null && execPanelBounds.contains(p)
-                && !(buyButtonBounds != null && buyButtonBounds.contains(p))
-                && !(sellButtonBounds != null && sellButtonBounds.contains(p))) {
-            draggingPanel = true;
-            dragStartMouseX = (int) p.getX();
-            dragStartMouseY = (int) p.getY();
-            dragStartOffsetX = panelOffsetX;
-            dragStartOffsetY = panelOffsetY;
-        }
-    }
-
-    @Override
-    public void onDrag(Point2D p, int flags, DrawContext ctx) {
-        if (!draggingPanel) return;
-        panelOffsetX = dragStartOffsetX + ((int) p.getX() - dragStartMouseX);
-        panelOffsetY = dragStartOffsetY + ((int) p.getY() - dragStartMouseY);
-        notifyRedraw();
-    }
-
-    @Override
-    public void onEndDrag(Point2D p, int flags, DrawContext ctx) {
-        draggingPanel = false;
     }
 
     @Override
@@ -654,8 +640,8 @@ public class RiskCalculator extends Study {
             initializeFiguresIfNeeded();
         }));
         items.add(new MenuItem(get("LBL_RESET_PANEL_POS"), () -> {
-            panelOffsetX = 0;
-            panelOffsetY = 0;
+            panelRelX = null;
+            panelRelY = null;
             notifyRedraw();
         }));
         return new MenuDescriptor(items, true);
@@ -1443,6 +1429,7 @@ public class RiskCalculator extends Study {
         addFigure(new LockButton());
         addFigure(new PositionSizeFigure());
         addFigure(new ExecutionPanelFigure());
+        addFigure(panelResize);
 
         figuresInitialized = true;
     }
@@ -1652,6 +1639,34 @@ public class RiskCalculator extends Study {
 
             if (price != 0) {
                 setLocation(time, price);
+            }
+            super.layout(ctx);
+        }
+    }
+
+    /** Drag handle for repositioning the execution panel anywhere on the chart. Uses
+     *  ResizeType.ALL (unrestricted) with absolute=false - confirmed via the SDK javadoc's
+     *  getGraphLocation()/setGraphLocation(Point2D) pair, which store/return plain screen (x,y)
+     *  pixels directly (no price/time involved). */
+    private class PanelResizePoint extends ResizePoint {
+        PanelResizePoint() {
+            super(Enums.ResizeType.ALL, false);
+            setFillColor(Color.ORANGE);
+            setOutlineColor(Color.WHITE);
+        }
+
+        @Override
+        public boolean isVisible(DrawContext ctx) {
+            return cachedSettings != null && cachedSettings.enableExecPanel;
+        }
+
+        @Override
+        public void layout(DrawContext ctx) {
+            // Don't reassert position while a drag on this exact point is in progress - matches
+            // the fix already applied for the SL/entry handles (see calculateValues()): fighting
+            // a live drag with a stale stored position makes the handle unusable mid-gesture.
+            if (!panelDragInProgress) {
+                setGraphLocation(new Point2D.Double(lastPanelX, lastPanelY));
             }
             super.layout(ctx);
         }
@@ -1952,7 +1967,6 @@ public class RiskCalculator extends Study {
             if (!visible) {
                 buyButtonBounds = null;
                 sellButtonBounds = null;
-                execPanelBounds = null;
                 return;
             }
 
@@ -2048,9 +2062,15 @@ public class RiskCalculator extends Study {
                 panelY = bounds.y + margin;
             }
 
-            // Apply free-drag offset on top of the configured corner position.
-            panelX += panelOffsetX;
-            panelY += panelOffsetY;
+            // If the user has dragged the panel at least once, that position wins outright over
+            // the corner setting. Otherwise fall through to the corner-based default above.
+            if (panelRelX != null && panelRelY != null) {
+                panelX = panelRelX.intValue();
+                panelY = panelRelY.intValue();
+            }
+            // Publish for PanelResizePoint.layout() to sync its handle to this frame's position.
+            lastPanelX = panelX;
+            lastPanelY = panelY;
 
             int buttonWidth = PANEL_WIDTH - PANEL_PADDING * 2;
             int buyY = panelY + PANEL_PADDING + textBlockHeight + PANEL_BUTTON_GAP;
@@ -2067,7 +2087,6 @@ public class RiskCalculator extends Study {
 
             buyButtonBounds = buyRect;
             sellButtonBounds = sellRect;
-            execPanelBounds = new Rectangle(panelX, panelY, PANEL_WIDTH, panelHeight);
 
             setBounds(new Rectangle(panelX, panelY, PANEL_WIDTH, panelHeight));
         }
