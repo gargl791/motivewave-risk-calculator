@@ -259,6 +259,7 @@ public class RiskCalculator extends Study {
     private boolean showEntryGhost;
     private boolean showSLGhost;
     private boolean justFinishedResize;
+    private boolean dragInProgress;
 
     @Override
     public void initialize(Defaults defaults) {
@@ -328,17 +329,32 @@ public class RiskCalculator extends Study {
 
     @Override
     public void clearState() {
+        // IMPORTANT: MotiveWave calls this directly and unconditionally as routine platform
+        // housekeeping any time a Figure is interacted with (confirmed via stack traces going
+        // straight through ChartMouseTool -> BaseStudy -> StudyWrapper -> clearState(), with no
+        // path through our own code) - not just for genuine "reset this study" moments. It fires
+        // on ordinary SL/entry drags. So this override must stay safe/idempotent and must NEVER
+        // wipe the user's planning prices - that logic lives in resetPlanningState() instead,
+        // called only from places that genuinely mean "start over" (Clear Drawings menu item).
         super.clearState();
         clearFigures();
         figuresInitialized = false;
+        cachedSettings = null;
+    }
+
+    /** Genuine full reset of user-entered planning state - entry/SL prices, lock-to-market, and
+     *  drag/hover bookkeeping. Only call this where a full reset is actually intended (e.g. the
+     *  "Clear Drawings" menu action) - never from clearState(), which the platform invokes on
+     *  its own during ordinary figure interactions (see clearState() for why). */
+    private void resetPlanningState() {
         entryPrice = null;
         stopLossPrice = null;
         lockedToMarket = true;
         justFinishedResize = false;
+        dragInProgress = false;
         hoverPrice = 0;
         lastBounds = null;
         ghostLine = null;
-        cachedSettings = null;
     }
 
     @Override
@@ -354,7 +370,13 @@ public class RiskCalculator extends Study {
         if (lockedToMarket) {
             entryPrice = getLatestPrice(ctx);
         }
-        updateResizePoints(ctx);
+        // Don't reassert resize-point locations from field state while the user has one actively
+        // grabbed - this runs on every tick (lockedToMarket keeps ticks flowing here even when
+        // only the SL handle is being dragged), and fighting the live drag with a stale
+        // stopLossPrice each tick was making the handle/line vanish mid-gesture.
+        if (!dragInProgress) {
+            updateResizePoints(ctx);
+        }
         notifyRedraw();
     }
 
@@ -363,7 +385,7 @@ public class RiskCalculator extends Study {
     public void onBarUpdate(DataContext ctx) {
         if (lockedToMarket) {
             entryPrice = getLatestPrice(ctx);
-            refreshFigures();
+            if (!dragInProgress) refreshFigures();
         }
     }
 
@@ -553,6 +575,12 @@ public class RiskCalculator extends Study {
     public void onResize(ResizePoint rp, DrawContext ctx) {
         if (rp == null) return;
 
+        // Set as soon as a drag starts (not just at the end) - MotiveWave's onClick() for the
+        // drag's mouse-up can fire before onEndResize() runs, so waiting until onEndResize left a
+        // window where the guard wasn't up yet in time for that click.
+        justFinishedResize = true;
+        dragInProgress = true;
+
         var instr = ctx.getDataContext().getInstrument();
         double price = instr.round(rp.getValue());
 
@@ -566,6 +594,7 @@ public class RiskCalculator extends Study {
 
     @Override
     public void onEndResize(ResizePoint rp, DrawContext ctx) {
+        dragInProgress = false;
         justFinishedResize = true;
         notifyRedraw();
     }
@@ -574,6 +603,7 @@ public class RiskCalculator extends Study {
     public MenuDescriptor onMenu(String plotName, Point loc, DrawContext ctx) {
         var items = new ArrayList<MenuItem>();
         items.add(new MenuItem(get("LBL_CLEAR_DRAWINGS"), () -> {
+            resetPlanningState();
             clearState();
             cachedSettings = new CachedSettings(getSettings());
             initializeFiguresIfNeeded();
@@ -584,9 +614,18 @@ public class RiskCalculator extends Study {
     @Override
     public void onSettingsUpdated(DataContext ctx) {
         super.onSettingsUpdated(ctx);
-        clearState();
+        // NOT clearState(): MotiveWave calls this callback both for genuine settings-dialog
+        // changes AND automatically whenever a draggable Figure's geometry changes (persisting a
+        // resize-drag's new position looks the same to the platform as a settings update). Full
+        // clearState() wipes entryPrice/stopLossPrice - so every SL/entry drag was immediately
+        // wiping itself out via this path. Just rebuild figures against fresh settings instead;
+        // planning state is untouched. Explicit "Clear Drawings" (onMenu) still calls
+        // clearState() directly when that's really what's wanted.
+        clearFigures();
+        figuresInitialized = false;
         cachedSettings = new CachedSettings(getSettings());
         initializeFiguresIfNeeded();
+        refreshFigures();
     }
 
     // ==================== Strategy lifecycle ====================
