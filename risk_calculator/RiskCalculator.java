@@ -95,6 +95,8 @@ public class RiskCalculator extends Study {
     private static final String EXTEND_PREVIEW = "extendPreview";
     private static final String EXTEND_LEVEL = "extendLevel";
     private static final String ENABLE_POS_SIZE = "enablePosSize";
+    private static final String DISPLAY_MICRO_ENABLED = "displayMicroEnabled";
+    private static final String DISPLAY_MICRO_INSTRUMENT = "displayMicroInstrument";
     private static final String FIXED_RISK_AMOUNT = "fixedRiskAmount";
     private static final String COLOR_WARNING = "colorWarning";
 
@@ -183,6 +185,8 @@ public class RiskCalculator extends Study {
         final boolean extendPreview;
         final boolean extendLevel;
         final boolean enablePosSize;
+        final boolean displayMicroEnabled;
+        final Instrument displayMicroInstrument;
         final boolean enableExecPanel;
         final String execPanelPos;
         final Instrument crossInstrument;
@@ -214,6 +218,14 @@ public class RiskCalculator extends Study {
             this.extendPreview = settings.getBoolean(EXTEND_PREVIEW, false);
             this.extendLevel = settings.getBoolean(EXTEND_LEVEL, false);
             this.enablePosSize = settings.getBoolean(ENABLE_POS_SIZE, true);
+            this.displayMicroEnabled = settings.getBoolean(DISPLAY_MICRO_ENABLED, false);
+            Instrument microInstr = null;
+            try {
+                microInstr = settings.getInstrument(DISPLAY_MICRO_INSTRUMENT);
+            } catch (Exception e) {
+                // Not selected, or not supported in this context.
+            }
+            this.displayMicroInstrument = microInstr;
             this.enableExecPanel = settings.getBoolean(ENABLE_EXEC_PANEL, true);
             this.execPanelPos = settings.getString(EXEC_PANEL_POS, CORNER_TOP_LEFT);
             Instrument xInstr = null;
@@ -260,6 +272,8 @@ public class RiskCalculator extends Study {
 
         var riskGrp = tab.addGroup(get("LBL_RISK_CALCULATION"));
         riskGrp.addRow(new BooleanDescriptor(ENABLE_POS_SIZE, get("LBL_ENABLE_POS_SIZE"), true));
+        riskGrp.addRow(new BooleanDescriptor(DISPLAY_MICRO_ENABLED, get("LBL_DISPLAY_MICRO_ENABLED"), false));
+        riskGrp.addRow(new InstrumentDescriptor(DISPLAY_MICRO_INSTRUMENT, get("LBL_DISPLAY_MICRO_INSTRUMENT")));
         riskGrp.addRow(new IntegerDescriptor(FIXED_RISK_AMOUNT, get("LBL_FIXED_RISK_AMOUNT"), 1000, 1, 1000000, 1));
 
         var execGrp = tab.addGroup(get("LBL_EXECUTION"));
@@ -1092,10 +1106,18 @@ public class RiskCalculator extends Study {
      */
     private int computeQuantity(DataContext dataCtx, Instrument instr, double entryPx, double slPx,
                                  int slippageTicks, int fixedRiskAmount, int maxContracts) {
-        double stopDistance = Math.abs(entryPx - slPx);
-        if (stopDistance <= 0) return 0;
-
         Instrument moneyInstr = resolveMoneyInstrument(dataCtx, instr);
+        return computeQuantityForInstrument(moneyInstr, entryPx, slPx, slippageTicks, fixedRiskAmount, maxContracts);
+    }
+
+    /** Core sizing math against an explicit money instrument - factored out of computeQuantity()
+     *  so the position-size display can size against a user-chosen instrument (e.g. always
+     *  micro) without going through the execution-side auto/manual Cross-Trade resolution. */
+    private int computeQuantityForInstrument(Instrument moneyInstr, double entryPx, double slPx,
+                                              int slippageTicks, int fixedRiskAmount, int maxContracts) {
+        double stopDistance = Math.abs(entryPx - slPx);
+        if (stopDistance <= 0 || moneyInstr == null) return 0;
+
         double tickSize = moneyInstr.getTickSize();
         double pointSize = moneyInstr.getPointSize();
         double pointValue = moneyInstr.getPointValue();
@@ -1669,7 +1691,7 @@ public class RiskCalculator extends Study {
         }
     }
 
-    private record PositionSizeResult(int positionSize, boolean warning) {}
+    private record PositionSizeResult(int positionSize, boolean warning, String symbol) {}
 
     /** Planning-only display calc. Delegates to computeQuantity() - the SAME method the real
      *  order path (executeEntry) uses, including the max-contracts cap, the slippage buffer,
@@ -1679,21 +1701,31 @@ public class RiskCalculator extends Study {
      *  the cap and the slippage buffer - see write-up, item 7.) */
     private PositionSizeResult calculatePositionSize(DataContext ctx) {
         if (entryPrice == null || stopLossPrice == null || cachedSettings == null) {
-            return new PositionSizeResult(0, false);
+            return new PositionSizeResult(0, false, null);
         }
 
         Instrument instr = ctx != null ? ctx.getInstrument() : null;
-        if (instr == null) return new PositionSizeResult(0, false);
+        if (instr == null) return new PositionSizeResult(0, false, null);
 
-        int qty = computeQuantity(ctx, instr, entryPrice, stopLossPrice, cachedSettings.slippageTicks,
-                cachedSettings.fixedRiskAmount, cachedSettings.maxContracts);
+        // Display-only sizing instrument: independent of execution. If the user has opted into
+        // showing micro-contract math and picked a micro instrument, size against that -
+        // regardless of what a real Buy/Sell click would actually route to (that's driven
+        // separately by Cross-Trade resolution in the exec panel / executeEntry()).
+        Instrument moneyInstr = (cachedSettings.displayMicroEnabled && cachedSettings.displayMicroInstrument != null)
+                ? cachedSettings.displayMicroInstrument
+                : resolveMoneyInstrument(ctx, instr);
+
+        int qty = computeQuantityForInstrument(moneyInstr, entryPrice, stopLossPrice,
+                cachedSettings.slippageTicks, cachedSettings.fixedRiskAmount, cachedSettings.maxContracts);
 
         // A planned trade (real stop distance set) that sizes to 0 means the risk-per-contract
         // exceeds the configured budget - the same condition executeEntry() would refuse to
         // submit. Warn here rather than silently showing 0.
         boolean warning = qty <= 0 && Math.abs(entryPrice - stopLossPrice) > 0;
 
-        return new PositionSizeResult(qty, warning);
+        String symbol = moneyInstr != null ? moneyInstr.getSymbol() : null;
+
+        return new PositionSizeResult(qty, warning, symbol);
     }
 
     private class PositionSizeFigure extends Figure {
@@ -1721,7 +1753,8 @@ public class RiskCalculator extends Study {
             if (!showPosSize) return;
 
             PositionSizeResult result = calculatePositionSize(ctx.getDataContext());
-            posSizeText = "Position Size: " + result.positionSize();
+            posSizeText = "Position Size: " + result.positionSize()
+                    + (result.symbol() != null ? " " + result.symbol() : "");
             posSizeWarning = result.warning();
 
             Rectangle bounds = ctx.getBounds();
