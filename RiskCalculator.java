@@ -180,6 +180,7 @@ public class RiskCalculator extends Study {
     private ResizePoint panelResize;
     private boolean panelDragInProgress;
     private int lastPanelX, lastPanelY;
+    private int lastPanelHeight;
 
     private static class CachedSettings {
         final int hoverWidth;
@@ -1661,6 +1662,16 @@ public class RiskCalculator extends Study {
         }
 
         @Override
+        public boolean contains(double x, double y, DrawContext ctx) {
+            // Widen the grabbable area to the whole panel body (not just the small anchor dot),
+            // excluding the Buy/Sell buttons so those keep working as plain clicks.
+            if (buyButtonBounds != null && buyButtonBounds.contains(x, y)) return false;
+            if (sellButtonBounds != null && sellButtonBounds.contains(x, y)) return false;
+            return x >= lastPanelX && x <= lastPanelX + PANEL_WIDTH
+                    && y >= lastPanelY && y <= lastPanelY + lastPanelHeight;
+        }
+
+        @Override
         public void layout(DrawContext ctx) {
             // Don't reassert position while a drag on this exact point is in progress - matches
             // the fix already applied for the SL/entry handles (see calculateValues()): fighting
@@ -2071,6 +2082,7 @@ public class RiskCalculator extends Study {
             // Publish for PanelResizePoint.layout() to sync its handle to this frame's position.
             lastPanelX = panelX;
             lastPanelY = panelY;
+            lastPanelHeight = panelHeight;
 
             int buttonWidth = PANEL_WIDTH - PANEL_PADDING * 2;
             int buyY = panelY + PANEL_PADDING + textBlockHeight + PANEL_BUTTON_GAP;
