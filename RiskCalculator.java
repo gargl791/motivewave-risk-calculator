@@ -1994,12 +1994,19 @@ public class RiskCalculator extends Study {
                     ? Math.abs(entryPrice - stopLossPrice) : 0;
             int qty = 0;
             double actualRisk = 0;
+            double worstCaseRisk = 0;
             double targetPreview = 0;
             if (instr != null && stopDistance > 0) {
                 qty = computeQuantity(dataCtx, instr, entryPrice, stopLossPrice, cachedSettings.slippageTicks,
                         (int) fixedRisk, maxContracts);
                 double riskPerContract = (stopDistance / moneyInstr.getPointSize()) * moneyInstr.getPointValue();
                 actualRisk = qty * riskPerContract;
+                // Worst-case risk mirrors the buffer computeQuantityForInstrument() sized against
+                // (slippageTicks * tickSize added to the stop distance) - shown alongside the ideal-fill
+                // actualRisk so the effect of the Slippage Ticks setting on quantity is visible, not just felt.
+                double bufferPts = cachedSettings.slippageTicks * moneyInstr.getTickSize();
+                double worstRiskPerContract = ((stopDistance + bufferPts) / moneyInstr.getPointSize()) * moneyInstr.getPointValue();
+                worstCaseRisk = qty * worstRiskPerContract;
                 boolean isLong = entryPrice > stopLossPrice;
                 targetPreview = isLong ? entryPrice + stopDistance * rr : entryPrice - stopDistance * rr;
             }
@@ -2027,9 +2034,15 @@ public class RiskCalculator extends Study {
             lines.add("Risk $" + (int) fixedRisk + "  R:R " + Util.formatDouble(rr, 1));
             if (stopDistance > 0) {
                 double slPoints = moneyInstr != null && moneyInstr.getPointSize() > 0 ? stopDistance / moneyInstr.getPointSize() : 0;
-                lines.add("Qty " + qty + "  Actual $" + Util.formatDouble(actualRisk, 0));
+                double moneyTick = moneyInstr != null ? moneyInstr.getTickSize() : 0;
+                if (moneyTick > 0) {
+                    slPoints = Math.round(slPoints / moneyTick) * moneyTick;
+                }
+                String worstSuffix = worstCaseRisk > actualRisk + 0.0001
+                        ? " (worst $" + Util.formatDouble(worstCaseRisk, 0) + ")" : "";
+                lines.add("Qty " + qty + "  Actual $" + Util.formatDouble(actualRisk, 0) + worstSuffix);
                 lines.add("SL " + (instr != null ? instr.format(stopLossPrice) : stopLossPrice)
-                        + " (" + Util.formatDouble(slPoints, 1) + "p)");
+                        + " (" + Util.formatDouble(slPoints, 2) + "p)");
                 lines.add("TP " + (instr != null ? instr.format(targetPreview) : targetPreview));
             } else {
                 lines.add("Set entry + SL to size a trade");
