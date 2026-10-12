@@ -274,6 +274,13 @@ public class RiskCalculator extends Study {
     private boolean justFinishedResize;
     private boolean dragInProgress;
 
+    private static final Graphics2D SCRATCH_GC =
+            new java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB).createGraphics();
+    private static synchronized FontMetrics metricsFor(Font f) {
+        return SCRATCH_GC.getFontMetrics(f);
+    }
+
+
     @Override
     public void initialize(Defaults defaults) {
         entryResize = new RiskResizePoint(this::getEntryPrice);
@@ -397,6 +404,7 @@ public class RiskCalculator extends Study {
     // ==================== Visual bar update (DataContext) - unchanged behavior ====================
     @Override
     public void onBarUpdate(DataContext ctx) {
+        if (ctx.isLoadingData()) return;
         if (lockedToMarket) {
             entryPrice = getLatestPrice(ctx);
             if (!dragInProgress) refreshFigures();
@@ -406,6 +414,7 @@ public class RiskCalculator extends Study {
     // ==================== Order bar update (OrderContext) - THIS is where clicks get executed ====================
     @Override
     public void onBarUpdate(OrderContext ctx) {
+        if (ctx.getDataContext().isLoadingData()) return;
         reconcileWithAccount(ctx);
 
         Enums.OrderAction action = pendingAction;
@@ -1918,10 +1927,7 @@ public class RiskCalculator extends Study {
 
             font = cachedSettings.fontInfo != null ? cachedSettings.fontInfo.getFont() : new Font("SansSerif", Font.PLAIN, 12);
 
-            java.awt.image.BufferedImage tempImg = new java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB);
-            Graphics2D tempGc = tempImg.createGraphics();
-            tempGc.setFont(font);
-            FontMetrics fm = tempGc.getFontMetrics();
+            FontMetrics fm = metricsFor(font);
 
             int textWidth = fm.stringWidth(posSizeText);
             int padding = 6;
@@ -1930,7 +1936,6 @@ public class RiskCalculator extends Study {
             posSizeX = hoverAreaLeft - posSizeWidth - LOCK_BUTTON_MARGIN;
             textY = posSizeY + (LOCK_BUTTON_HEIGHT - fm.getHeight()) / 2 + fm.getAscent();
 
-            tempGc.dispose();
 
             posSizeBgColor = cachedSettings.lockBgColor;
             posSizeOutlineColor = cachedSettings.lockOutlineColor;
@@ -2223,17 +2228,13 @@ public class RiskCalculator extends Study {
             if (label != null) {
                 font = cachedSettings.fontInfo != null ? cachedSettings.fontInfo.getFont() : new Font("SansSerif", Font.PLAIN, 12);
 
-                java.awt.image.BufferedImage tempImg = new java.awt.image.BufferedImage(1, 1, java.awt.image.BufferedImage.TYPE_INT_ARGB);
-                Graphics2D tempGc = tempImg.createGraphics();
-                tempGc.setFont(font);
-                FontMetrics fm = tempGc.getFontMetrics();
+                FontMetrics fm = metricsFor(font);
 
                 int labelWidth = fm.stringWidth(label);
                 int centerX = hoverAreaLeft + (cachedSettings.hoverWidth / 2);
                 labelX = centerX - (labelWidth / 2);
                 labelY = y - LABEL_OFFSET_Y;
 
-                tempGc.dispose();
             }
         }
 
