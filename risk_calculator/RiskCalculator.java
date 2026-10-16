@@ -997,6 +997,10 @@ public class RiskCalculator extends Study {
             }
 
             armedStopLossPrice = sl;
+            // Freeze the entry line at the SAME moment the SL locks (not later on the fill callback),
+            // so it can never keep trailing the market between submit and fill. Replaced by the real
+            // average fill price in handleEntryFilled().
+            armedEntryPrice = marketPx;
             expectedTradeInstrument = tradeInstr;
             // DELIBERATELY submitted without an explicit instrument (the 2-arg overload, not
             // createMarketOrder(tradeInstr, action, quantity) as flattenInstrument() uses). The
@@ -1262,9 +1266,12 @@ public class RiskCalculator extends Study {
         float filledQty = order.getFilledAsFloat();
         if (filledQty <= 0) return;
 
-        if (armedEntryPrice == null) {
-            try { armedEntryPrice = (double) order.getAvgFillPrice(); } catch (Exception ignored) { }
-        }
+        // Refine the frozen entry to the real average fill (updates on partial fills too). Ignore
+        // invalid values so a bad read can't leave the entry line at 0 or NaN.
+        try {
+            double avg = order.getAvgFillPrice();
+            if (avg > 0 && !Double.isNaN(avg)) armedEntryPrice = avg;
+        } catch (Exception ignored) { }
 
         boolean isLong = order.isBuy();
         Double sl = armedStopLossPrice;
